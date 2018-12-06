@@ -3,32 +3,9 @@
 # Cosimo Simeone - 06/11/2018 - OS Update agent
 # CAS-06386-W0G2P4 - LinuxPatching
 
-## CONSTRAINS and ASSUMPTIONS:
-## *  File $updateAtTime_file empty means "DO NOT UPDATE", and "SOMETHING IS WRONG"
-## *  If no updates availables, but file $updateAtTime_file exists,  $updateAtTime_file file will be removed.
-##      Which  means: "If you ask me to update myself, but i never told you i need to be updated, *you* are doing it wrong"
-## *  ERRORFILE will be created in case of serious errors; must PHPSM it!!!
-## *  You cannot specify the minutes in which update will take place.
-##      Because it would be nightmare to check hour-minute passed
-## *  If you specify 19 in $updateAtTime_file, and it's 20 already, update will be processed in 23 hours (19:00 hours, next day)!
-## *  AS in case above, if packages needing to be upgaded between the $updateAtTime_file file creation and the update itself change,
-##      they will be installed.
-##      Scenario: crontab is scheduled every 20 minutes
-##                at 19:00 server says "I have Package1 and Package2 nedding an update"
-##                at 19:05 sysadmin creates $updateAtTime_file
-##                at 19:12 Debian releases a new update for Package3
-##                at 19:20 script runs, and updated Package1, Package2 AND Package3.
-##                It is not possible to ask Debian to update a specific package and keep thers back.
-##                That is what makes Debian a stable OS...
-##
-## QUESTIONS:
-##    * How to deal with packages "being kept back"???
-##    * Should this script mount and umount NFS? Extra security.
-##
-## --- --- --- --- --- ---
-##
 ## CHANGELOG:
 ## 20181106 - Added comments
+## 20181206 - Added filesystem usage check
 ##
 
 
@@ -40,6 +17,13 @@
 
 # If DEBUG variable is not set, assume it is 0 (no backup)
 : ${DEBUG:=0}
+
+### FileSystem check limit
+# Please put here DECIMAL digit for limit.
+# If you want to be alerted for FS usage > 80%, put export FILESYSTEM_PCT_LIMIT=8
+# If you want to be alerted for FS usage > 70%, put export FILESYSTEM_PCT_LIMIT=7
+# And so on
+export FILESYSTEM_PCT_LIMIT=8
 
 ### Aliasing some custom echo commands
 shopt -s expand_aliases
@@ -56,6 +40,8 @@ export updateAtTime_file=$communicationDir/UPDATE_YOURSELF
 export needUpdate_file=$communicationDir/I_NEED_2B_UPDATE
 export needUpdate_tmpFile=$communicationDir/I_NEED_2B_UPDATE.tmp
 export needReboot_file=$communicationDir/I_NEED_2B_REBOOTED
+export filesystemFull_file=$communicationDir/FILESYSTEM_FULL
+export filesystemFull_tmpFile=$communicationDir/FILESYSTEM_FULL.tmp
 
 export LOGFILE=$communicationDir/`basename "$0"`.log
 export ERRORFILE=$communicationDir/`basename "$0"`.error
@@ -125,6 +111,25 @@ function DEMO_installAvailableUpdates_DEMO {
 }
 
 
+# This function checks filesystem usage
+function checkFilesystemUsage {
+  echod "Checking FS usage"
+  rm -f $filesystemFull_file
+  df -h | grep -G "[$FILESYSTEM_PCT_LIMIT-9,10][0-9]%" > $filesystemFull_tmpFile 2> /dev/null
+  retVal=$?
+  echod "checkUpdatesAvailable retVal=$retVal"
+  if [[ $retVal -eq 0 ]]; then
+    echoi "Some filesystem might need a cleanup"  >>$LOGFILE
+    mv -f $filesystemFull_tmpFile $filesystemFull_file
+  else
+    echod "All FS below threshold"
+    rm -f $filesystemFull_tmpFile $filesystemFull_file
+  fi
+
+}
+
+
+
 ###########################################################################
 ####### MAIN part
 ###########################################################################
@@ -143,6 +148,7 @@ fi
 # if checkUpdatesAvailable -eq 1 ; then
 checkUpdatesAvailable
 updatesAvailable=$?
+
 if [[ $updatesAvailable -ne 0 ]]; then
 
   # No updates available. Notify it, and exit with success
@@ -157,72 +163,80 @@ if [[ $updatesAvailable -ne 0 ]]; then
     rm -f $updateAtTime_file
   fi
 
-  # Before exiting, check if a reboot is needed.
-  checkRebootNeeded
-  exit 0
-fi
+
+else #if [[ $updatesAvailable -ne 0 ]]; then
 
 
-### Executing being here means: there are updates available
-echoi "There are updates Available" >>$LOGFILE
-mv -f $needUpdate_tmpFile $needUpdate_file
+  ### Executing being here means: there are updates available
+  echoi "There are updates Available" >>$LOGFILE
+  mv -f $needUpdate_tmpFile $needUpdate_file
 
-# Now check: have i being asked to install them?
-if [[ -f $updateAtTime_file ]]; then
+  # Now check: have i being asked to install them?
+  if [[ -f $updateAtTime_file ]]; then
 
-  echod "File $updateAtTime_file exists"
+    echod "File $updateAtTime_file exists"
 
-  # Oh, and just in case, trim spaces, convert to unix, and just take 1st line in file
-  [[ -s $updateAtTime_file ]] && export inTime=`head -1 $updateAtTime_file | tr -d '\015 '`
+    # Oh, and just in case, trim spaces, convert to unix, and just take 1st line in file
+    [[ -s $updateAtTime_file ]] && export inTime=`head -1 $updateAtTime_file | tr -d '\015 '`
 
-  # Assuming here: "file existing, but with empty line in it; that means "something is wrong"
-  # (read above)
-  if [ -z "$inTime" ]; then
-    echoe "Wrong Date in $updateAtTime_file: |$inTime| is empty" | tee -a $LOGFILE
-    touch $ERRORFILE
-    exit 1
+    # Assuming here: "file existing, but with empty line in it; that means "something is wrong"
+    # (read above)
+    if [ -z "$inTime" ]; then
+      echoe "Wrong Date in $updateAtTime_file: |$inTime| is empty" | tee -a $LOGFILE
+      touch $ERRORFILE
+      exit 1
+    fi
+
+    # Check hour passed is a valid hour
+    # (10# tells bash this is not an octal number)
+    if [[ 10#$inTime -lt 10#0 || 10#$inTime -gt 10#23 ]]; then
+      echoe "Wrong Date in $updateAtTime_file: |$inTime|" | tee -a $LOGFILE
+      touch $ERRORFILE
+      exit 1
+    fi
+
+    # Ok. Code is here. So far so good.
+    askedDate=$inTime
+    actualDate=`date +%H`
+    echod " askedDate=$inTime"
+    echod actualDate=$actualDate
+
+    # Check if we are in hour asked to be updated
+    if [[ 10#$actualDate -ne 10#$askedDate ]]; then
+      echoi "Hour |$askedDate| not reached yet, it's still |$actualDate|" >> $LOGFILE
+      exit 0
+    fi
+
+    ### The real thing is happening here.
+    echoi "Applying updates!!! ">> $LOGFILE
+    #DEMO_installAvailableUpdates_DEMO
+    installAvailableUpdates
+
+    echoi "Applying updates done; removing flag files">> $LOGFILE
+    rm -f $updateAtTime_file
+    rm -f $needUpdate_file
+
+    echoi "Alles gut, have a nice day">> $LOGFILE
+    retVal=0
+  else
+    ### Here if updates available, but no $updateAtTime_file exists, so nothing to do
+    echoi "Flag file does not exist; nothing to do" >> $LOGFILE
+    echoi "Expected flag file is $updateAtTime_file" >> $LOGFILE
+    retVal=0
   fi
 
-  # Check hour passed is a valid hour
-  # (10# tells bash this is not an octal number)
-  if [[ 10#$inTime -lt 10#0 || 10#$inTime -gt 10#23 ]]; then
-    echoe "Wrong Date in $updateAtTime_file: |$inTime|" | tee -a $LOGFILE
-    touch $ERRORFILE
-    exit 1
-  fi
+fi #if [[ $updatesAvailable -ne 0 ]]; then
 
-  # Ok. Code is here. So far so good.
-  askedDate=$inTime
-  actualDate=`date +%H`
-  echod " askedDate=$inTime"
-  echod actualDate=$actualDate
-
-  # Check if we are in hour asked to be updated
-  if [[ 10#$actualDate -ne 10#$askedDate ]]; then
-    echoi "Hour |$askedDate| not reached yet, it's still |$actualDate|" >> $LOGFILE
-    exit 0
-  fi
-
-  ### The real thing is happening here.
-  echoi "Applying updates!!! ">> $LOGFILE
-  #DEMO_installAvailableUpdates_DEMO
-  installAvailableUpdates
-
-  echoi "Applying updates done; removing flag files">> $LOGFILE
-  rm -f $updateAtTime_file
-  rm -f $needUpdate_file
-
-  echoi "Alles gut, have a nice day">> $LOGFILE
-  retVal=0
-else
-  ### Here if updates available, but no $updateAtTime_file exists, so nothing to do
-  echoi "Flag file does not exist; nothing to do" >> $LOGFILE
-  echoi "Expected flag file is $updateAtTime_file" >> $LOGFILE
-  retVal=0
-fi
 
 # Check if reboot file needs to be craeted
 checkRebootNeeded
+
+# Check Filesystem usage
+checkFilesystemUsage
+
+echo MIMMO
+df -h | grep -G "[$FILESYSTEM_PCT_LIMIT-9,10][0-9]%"
+
 
 if [[ $retVal -ne 0 ]]; then
   exit $retVal
