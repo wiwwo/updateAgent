@@ -115,14 +115,14 @@ function DEMO_installAvailableUpdates_DEMO {
 function checkFilesystemUsage {
   echod "Checking FS usage"
   rm -f $filesystemFull_file
-  df -h | grep -G "[$FILESYSTEM_PCT_LIMIT-9,10][0-9]%" > $filesystemFull_tmpFile 2> /dev/null
+  df -h | grep -E "([$FILESYSTEM_PCT_LIMIT-9][0-9]\%|100\%)" > $filesystemFull_tmpFile 2> /dev/null
   retVal=$?
-  echod "checkUpdatesAvailable retVal=$retVal"
+  echod "checkFilesystemUsage retVal=$retVal"
   if [[ $retVal -eq 0 ]]; then
     echoi "Some filesystem might need a cleanup"  >>$LOGFILE
     mv -f $filesystemFull_tmpFile $filesystemFull_file
   else
-    echod "All FS below threshold"
+    echoi "All FS below threshold"  >>$LOGFILE
     rm -f $filesystemFull_tmpFile $filesystemFull_file
   fi
 
@@ -233,10 +233,6 @@ checkRebootNeeded
 
 # Check Filesystem usage
 checkFilesystemUsage
-
-echo MIMMO
-df -h | grep -G "[$FILESYSTEM_PCT_LIMIT-9,10][0-9]%"
-
 
 if [[ $retVal -ne 0 ]]; then
   exit $retVal
